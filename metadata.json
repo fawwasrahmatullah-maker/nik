@@ -1,0 +1,6 @@
+{
+  "name": "NikahPlan - Budgeting & Tabungan Pernikahan Pasangan",
+  "description": "Platform budgeting dan pelacakan tabungan pernikahan transparan untuk pasangan, dilengkapi target dana impian, notifikasi milestone otomatis, dan dasbor progres real-time.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
