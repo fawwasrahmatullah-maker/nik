@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import confetti from 'canvas-confetti';
 import { 
   CoupleInfo, 
@@ -30,6 +30,13 @@ import {
   playDepositSound, 
   formatIDR 
 } from './utils/formatters';
+import { 
+  getInitialRoomId, 
+  pushRoomDataToServer, 
+  fetchRoomDataFromServer, 
+  resetRoomOnServer, 
+  CLIENT_ID 
+} from './services/realtimeSync';
 
 import { Header } from './components/Header';
 import { DashboardOverview } from './components/DashboardOverview';
@@ -43,6 +50,7 @@ import { MilestoneCelebrationModal } from './components/MilestoneCelebrationModa
 import { NotificationDrawer } from './components/NotificationDrawer';
 import { CoupleSettingsModal } from './components/CoupleSettingsModal';
 import { BudgetCalculatorModal } from './components/BudgetCalculatorModal';
+import { ShareRoomModal } from './components/ShareRoomModal';
 
 const STORAGE_KEYS = {
   COUPLE_INFO: 'nikahplan_couple_info',
@@ -55,10 +63,15 @@ const STORAGE_KEYS = {
 };
 
 export default function App() {
-  // Load state from localStorage or initial seed
+  // Active Room ID from URL query ?room=... or localStorage
+  const [roomId, setRoomId] = useState<string>(() => getInitialRoomId());
+  const [syncStatus, setSyncStatus] = useState<'connected' | 'connecting' | 'reconnecting' | 'offline'>('connecting');
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+
+  // Core state
   const [coupleInfo, setCoupleInfo] = useState<CoupleInfo>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.COUPLE_INFO);
+      const saved = localStorage.getItem(`${STORAGE_KEYS.COUPLE_INFO}_${roomId}`);
       return saved ? JSON.parse(saved) : initialCoupleInfo;
     } catch {
       return initialCoupleInfo;
@@ -67,7 +80,7 @@ export default function App() {
 
   const [categories, setCategories] = useState<BudgetCategory[]>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.CATEGORIES);
+      const saved = localStorage.getItem(`${STORAGE_KEYS.CATEGORIES}_${roomId}`);
       return saved ? JSON.parse(saved) : initialBudgetCategories;
     } catch {
       return initialBudgetCategories;
@@ -76,7 +89,7 @@ export default function App() {
 
   const [transactions, setTransactions] = useState<Transaction[]>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.TRANSACTIONS);
+      const saved = localStorage.getItem(`${STORAGE_KEYS.TRANSACTIONS}_${roomId}`);
       return saved ? JSON.parse(saved) : initialTransactions;
     } catch {
       return initialTransactions;
@@ -85,7 +98,7 @@ export default function App() {
 
   const [milestones, setMilestones] = useState<Milestone[]>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.MILESTONES);
+      const saved = localStorage.getItem(`${STORAGE_KEYS.MILESTONES}_${roomId}`);
       return saved ? JSON.parse(saved) : initialMilestones;
     } catch {
       return initialMilestones;
@@ -94,7 +107,7 @@ export default function App() {
 
   const [notifications, setNotifications] = useState<CoupleNotification[]>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
+      const saved = localStorage.getItem(`${STORAGE_KEYS.NOTIFICATIONS}_${roomId}`);
       return saved ? JSON.parse(saved) : initialNotifications;
     } catch {
       return initialNotifications;
@@ -103,7 +116,7 @@ export default function App() {
 
   const [loveNotes, setLoveNotes] = useState<LoveNote[]>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.LOVE_NOTES);
+      const saved = localStorage.getItem(`${STORAGE_KEYS.LOVE_NOTES}_${roomId}`);
       return saved ? JSON.parse(saved) : initialLoveNotes;
     } catch {
       return initialLoveNotes;
@@ -112,7 +125,7 @@ export default function App() {
 
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.CHAT_MESSAGES);
+      const saved = localStorage.getItem(`${STORAGE_KEYS.CHAT_MESSAGES}_${roomId}`);
       return saved ? JSON.parse(saved) : initialChatMessages;
     } catch {
       return initialChatMessages;
@@ -133,35 +146,120 @@ export default function App() {
   const [isCalculatorOpen, setIsCalculatorOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const lastPushedHashRef = useRef<string>('');
 
-  // Sync to localStorage
+  // Local storage caching per room
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.COUPLE_INFO, JSON.stringify(coupleInfo));
-  }, [coupleInfo]);
+    try {
+      localStorage.setItem(`${STORAGE_KEYS.COUPLE_INFO}_${roomId}`, JSON.stringify(coupleInfo));
+      localStorage.setItem(`${STORAGE_KEYS.CATEGORIES}_${roomId}`, JSON.stringify(categories));
+      localStorage.setItem(`${STORAGE_KEYS.TRANSACTIONS}_${roomId}`, JSON.stringify(transactions));
+      localStorage.setItem(`${STORAGE_KEYS.MILESTONES}_${roomId}`, JSON.stringify(milestones));
+      localStorage.setItem(`${STORAGE_KEYS.NOTIFICATIONS}_${roomId}`, JSON.stringify(notifications));
+      localStorage.setItem(`${STORAGE_KEYS.LOVE_NOTES}_${roomId}`, JSON.stringify(loveNotes));
+      localStorage.setItem(`${STORAGE_KEYS.CHAT_MESSAGES}_${roomId}`, JSON.stringify(chatMessages));
+    } catch {
+      // quota or private browsing
+    }
+  }, [coupleInfo, categories, transactions, milestones, notifications, loveNotes, chatMessages, roomId]);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(categories));
-  }, [categories]);
+  // Push updates to server helper
+  const syncToServer = useCallback((patch: Partial<{
+    coupleInfo: CoupleInfo;
+    categories: BudgetCategory[];
+    transactions: Transaction[];
+    milestones: Milestone[];
+    notifications: CoupleNotification[];
+    loveNotes: LoveNote[];
+    chatMessages: ChatMessage[];
+  }>) => {
+    const fullBundle = {
+      coupleInfo: patch.coupleInfo ?? coupleInfo,
+      categories: patch.categories ?? categories,
+      transactions: patch.transactions ?? transactions,
+      milestones: patch.milestones ?? milestones,
+      notifications: patch.notifications ?? notifications,
+      loveNotes: patch.loveNotes ?? loveNotes,
+      chatMessages: patch.chatMessages ?? chatMessages,
+    };
+    pushRoomDataToServer(roomId, fullBundle);
+  }, [coupleInfo, categories, transactions, milestones, notifications, loveNotes, chatMessages, roomId]);
 
+  // Real-time SSE Connection & Auto Sync
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify(transactions));
-  }, [transactions]);
+    let eventSource: EventSource | null = null;
+    let pollInterval: any = null;
+    let isMounted = true;
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.MILESTONES, JSON.stringify(milestones));
-  }, [milestones]);
+    setSyncStatus('connecting');
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifications));
-  }, [notifications]);
+    // 1. Initial snapshot fetch
+    fetchRoomDataFromServer(roomId).then((data) => {
+      if (!isMounted || !data) return;
+      if (data.coupleInfo) setCoupleInfo(data.coupleInfo);
+      if (Array.isArray(data.categories)) setCategories(data.categories);
+      if (Array.isArray(data.transactions)) setTransactions(data.transactions);
+      if (Array.isArray(data.milestones)) setMilestones(data.milestones);
+      if (Array.isArray(data.notifications)) setNotifications(data.notifications);
+      if (Array.isArray(data.loveNotes)) setLoveNotes(data.loveNotes);
+      if (Array.isArray(data.chatMessages)) setChatMessages(data.chatMessages);
+      setSyncStatus('connected');
+    });
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.LOVE_NOTES, JSON.stringify(loveNotes));
-  }, [loveNotes]);
+    // 2. Connect to Server-Sent Events (SSE)
+    try {
+      const sseUrl = `/api/wedding/${encodeURIComponent(roomId)}/events`;
+      eventSource = new EventSource(sseUrl);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.CHAT_MESSAGES, JSON.stringify(chatMessages));
-  }, [chatMessages]);
+      eventSource.onopen = () => {
+        if (isMounted) setSyncStatus('connected');
+      };
+
+      eventSource.onmessage = (event) => {
+        if (!isMounted) return;
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === 'CONNECTED' || payload.type === 'ROOM_UPDATE') {
+            const data = payload.data;
+            if (data && payload.senderClientId !== CLIENT_ID) {
+              // Remote partner changed something -> update local view instantly!
+              if (data.coupleInfo) setCoupleInfo(data.coupleInfo);
+              if (Array.isArray(data.categories)) setCategories(data.categories);
+              if (Array.isArray(data.transactions)) setTransactions(data.transactions);
+              if (Array.isArray(data.milestones)) setMilestones(data.milestones);
+              if (Array.isArray(data.notifications)) setNotifications(data.notifications);
+              if (Array.isArray(data.loveNotes)) setLoveNotes(data.loveNotes);
+              if (Array.isArray(data.chatMessages)) setChatMessages(data.chatMessages);
+            }
+            setSyncStatus('connected');
+          }
+        } catch {
+          // ignore heartbeat
+        }
+      };
+
+      eventSource.onerror = () => {
+        if (isMounted) setSyncStatus('reconnecting');
+      };
+    } catch {
+      if (isMounted) setSyncStatus('reconnecting');
+    }
+
+    // 3. Fallback sync poll every 5 seconds in case connection dropped
+    pollInterval = setInterval(async () => {
+      if (!isMounted) return;
+      const data = await fetchRoomDataFromServer(roomId);
+      if (data) {
+        setSyncStatus('connected');
+      }
+    }, 5000);
+
+    return () => {
+      isMounted = false;
+      if (eventSource) eventSource.close();
+      if (pollInterval) clearInterval(pollInterval);
+    };
+  }, [roomId]);
 
   // Derived financial computations
   const totalDeposited = useMemo(() => {
@@ -193,19 +291,16 @@ export default function App() {
   }, [notifications]);
 
   // Automatic Milestone Detection Engine
-  const checkMilestones = (newTotalDeposit: number) => {
+  const checkMilestones = (newTotalDeposit: number, currentList: Milestone[]) => {
     let newlyAchieved: Milestone | null = null;
 
-    setMilestones((prevMilestones) => {
-      const updated = prevMilestones.map((m) => {
-        if (!m.achieved && newTotalDeposit >= m.targetAmount) {
-          const nowStr = new Date().toISOString().split('T')[0];
-          newlyAchieved = { ...m, achieved: true, achievedDate: nowStr };
-          return newlyAchieved;
-        }
-        return m;
-      });
-      return updated;
+    const updated = currentList.map((m) => {
+      if (!m.achieved && newTotalDeposit >= m.targetAmount) {
+        const nowStr = new Date().toISOString().split('T')[0];
+        newlyAchieved = { ...m, achieved: true, achievedDate: nowStr };
+        return newlyAchieved;
+      }
+      return m;
     });
 
     if (newlyAchieved) {
@@ -236,7 +331,6 @@ export default function App() {
         milestoneId: achievedItem.id,
         amount: achievedItem.targetAmount,
       };
-      setNotifications((prev) => [newNotif, ...prev]);
 
       // Add System Chat Announcement
       const newChat: ChatMessage = {
@@ -248,10 +342,22 @@ export default function App() {
         type: 'savings_milestone',
         highlightAmount: achievedItem.targetAmount,
       };
+
+      setMilestones(updated);
+      setNotifications((prev) => [newNotif, ...prev]);
       setChatMessages((prev) => [...prev, newChat]);
+
+      // Broadcast to partner in real-time
+      syncToServer({
+        milestones: updated,
+        notifications: [newNotif, ...notifications],
+        chatMessages: [...chatMessages, newChat],
+      });
 
       // Open celebration modal
       setCelebrationMilestone(achievedItem);
+    } else {
+      setMilestones(updated);
     }
   };
 
@@ -263,7 +369,8 @@ export default function App() {
       createdAt: Date.now(),
     };
 
-    setTransactions((prev) => [newTx, ...prev]);
+    const nextTransactions = [newTx, ...transactions];
+    setTransactions(nextTransactions);
 
     if (newTx.type === 'deposit') {
       playDepositSound();
@@ -280,10 +387,17 @@ export default function App() {
         read: false,
         amount: newTx.amount,
       };
-      setNotifications((prev) => [notif, ...prev]);
+      const nextNotifications = [notif, ...notifications];
+      setNotifications(nextNotifications);
 
       // Check milestones
-      checkMilestones(newTotal);
+      checkMilestones(newTotal, milestones);
+
+      // Push real-time to server
+      syncToServer({
+        transactions: nextTransactions,
+        notifications: nextNotifications,
+      });
     } else {
       // Expense notification
       const notif: CoupleNotification = {
@@ -295,12 +409,21 @@ export default function App() {
         read: false,
         amount: newTx.amount,
       };
-      setNotifications((prev) => [notif, ...prev]);
+      const nextNotifications = [notif, ...notifications];
+      setNotifications(nextNotifications);
+
+      // Push real-time to server
+      syncToServer({
+        transactions: nextTransactions,
+        notifications: nextNotifications,
+      });
     }
   };
 
   const handleDeleteTransaction = (id: string) => {
-    setTransactions((prev) => prev.filter((t) => t.id !== id));
+    const nextTransactions = transactions.filter((t) => t.id !== id);
+    setTransactions(nextTransactions);
+    syncToServer({ transactions: nextTransactions });
   };
 
   // Chat message send handler
@@ -319,14 +442,18 @@ export default function App() {
       timestamp: Date.now(),
     };
 
-    setChatMessages((prev) => [...prev, newChat]);
+    const nextChats = [...chatMessages, newChat];
+    setChatMessages(nextChats);
     playDepositSound();
+
+    // Broadcast chat message to partner device immediately
+    syncToServer({ chatMessages: nextChats });
   };
 
   const handleAddReaction = (messageId: string, emoji: string) => {
-    setChatMessages((prev) =>
-      prev.map((m) => (m.id === messageId ? { ...m, reaction: emoji } : m))
-    );
+    const nextChats = chatMessages.map((m) => (m.id === messageId ? { ...m, reaction: emoji } : m));
+    setChatMessages(nextChats);
+    syncToServer({ chatMessages: nextChats });
   };
 
   // Custom milestone
@@ -337,7 +464,9 @@ export default function App() {
       achieved: totalDeposited >= m.targetAmount,
       achievedDate: totalDeposited >= m.targetAmount ? new Date().toISOString().split('T')[0] : undefined,
     };
-    setMilestones((prev) => [...prev, newM]);
+    const nextMilestones = [...milestones, newM];
+    setMilestones(nextMilestones);
+    syncToServer({ milestones: nextMilestones });
 
     if (newM.achieved) {
       setCelebrationMilestone(newM);
@@ -345,7 +474,9 @@ export default function App() {
   };
 
   const handleDeleteMilestone = (id: string) => {
-    setMilestones((prev) => prev.filter((m) => m.id !== id));
+    const nextMilestones = milestones.filter((m) => m.id !== id);
+    setMilestones(nextMilestones);
+    syncToServer({ milestones: nextMilestones });
   };
 
   // Love notes
@@ -354,17 +485,34 @@ export default function App() {
       ...note,
       id: `note-${Date.now()}`,
     };
-    setLoveNotes((prev) => [newNote, ...prev]);
+    const nextNotes = [newNote, ...loveNotes];
+    setLoveNotes(nextNotes);
+    syncToServer({ loveNotes: nextNotes });
   };
 
   const handleDeleteLoveNote = (id: string) => {
-    setLoveNotes((prev) => prev.filter((n) => n.id !== id));
+    const nextNotes = loveNotes.filter((n) => n.id !== id);
+    setLoveNotes(nextNotes);
+    syncToServer({ loveNotes: nextNotes });
+  };
+
+  // Change room handler
+  const handleChangeRoom = (newRoomId: string) => {
+    if (!newRoomId || newRoomId === roomId) return;
+    setRoomId(newRoomId);
+    localStorage.setItem('nikahplan_active_room', newRoomId);
+
+    // Update URL query param without full reload
+    const url = new URL(window.location.href);
+    url.searchParams.set('room', newRoomId);
+    window.history.replaceState({}, '', url.toString());
   };
 
   // Export / Import
   const handleExportData = () => {
     const exportBundle = {
       version: 1,
+      roomId,
       exportedAt: new Date().toISOString(),
       coupleInfo,
       categories,
@@ -403,8 +551,11 @@ export default function App() {
         if (parsed.notifications) setNotifications(parsed.notifications);
         if (parsed.loveNotes) setLoveNotes(parsed.loveNotes);
         if (parsed.chatMessages) setChatMessages(parsed.chatMessages);
-        alert('Data berhasil dipulihkan dari cadangan!');
-      } catch (err) {
+
+        // Push restored data to server
+        syncToServer(parsed);
+        alert('Data berhasil dipulihkan dan disinkronkan ke cloud server!');
+      } catch {
         alert('Gagal membaca file cadangan. Pastikan format file JSON valid.');
       }
     };
@@ -412,27 +563,49 @@ export default function App() {
     e.target.value = '';
   };
 
-  const handleResetData = () => {
-    if (confirm('Kembalikan semua data ke contoh awal? Semua data yang baru Anda ubah akan digantikan data demo.')) {
-      setCoupleInfo(initialCoupleInfo);
-      setCategories(initialBudgetCategories);
-      setTransactions(initialTransactions);
-      setMilestones(initialMilestones);
-      setNotifications(initialNotifications);
-      setLoveNotes(initialLoveNotes);
-      setChatMessages(initialChatMessages);
-      localStorage.clear();
-      alert('Data telah dikembalikan ke contoh semula.');
+  const handleResetData = async () => {
+    if (confirm('Kembalikan semua data ke contoh awal? Semua data yang baru Anda ubah akan digantikan data demo di server.')) {
+      const resetData = await resetRoomOnServer(roomId);
+      if (resetData) {
+        setCoupleInfo(resetData.coupleInfo);
+        setCategories(resetData.categories);
+        setTransactions(resetData.transactions);
+        setMilestones(resetData.milestones);
+        setNotifications(resetData.notifications);
+        setLoveNotes(resetData.loveNotes);
+        setChatMessages(resetData.chatMessages);
+      } else {
+        setCoupleInfo(initialCoupleInfo);
+        setCategories(initialBudgetCategories);
+        setTransactions(initialTransactions);
+        setMilestones(initialMilestones);
+        setNotifications(initialNotifications);
+        setLoveNotes(initialLoveNotes);
+        setChatMessages(initialChatMessages);
+        syncToServer({
+          coupleInfo: initialCoupleInfo,
+          categories: initialBudgetCategories,
+          transactions: initialTransactions,
+          milestones: initialMilestones,
+          notifications: initialNotifications,
+          loveNotes: initialLoveNotes,
+          chatMessages: initialChatMessages,
+        });
+      }
+      alert('Data telah dikembalikan ke contoh semula dan tersinkronkan.');
     }
   };
 
   // Notification actions
   const handleMarkAllNotifsRead = () => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    const nextNotifs = notifications.map((n) => ({ ...n, read: true }));
+    setNotifications(nextNotifs);
+    syncToServer({ notifications: nextNotifs });
   };
 
   const handleClearNotifs = () => {
     setNotifications([]);
+    syncToServer({ notifications: [] });
   };
 
   const handleOpenAddModal = (type?: TransactionType, partner?: PartnerRole) => {
@@ -452,7 +625,7 @@ export default function App() {
         className="hidden"
       />
 
-      {/* Main Header */}
+      {/* Main Header with Realtime Indicator & Link Share */}
       <Header
         coupleInfo={coupleInfo}
         activeTab={activeTab}
@@ -466,6 +639,9 @@ export default function App() {
         onExportData={handleExportData}
         onImportData={handleTriggerImport}
         onResetData={handleResetData}
+        roomId={roomId}
+        syncStatus={syncStatus}
+        onOpenShareModal={() => setIsShareModalOpen(true)}
       />
 
       {/* Main Body Content based on active tab */}
@@ -494,13 +670,19 @@ export default function App() {
             transactions={transactions}
             coupleInfo={coupleInfo}
             onUpdateCategory={(updated) => {
-              setCategories((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+              const next = categories.map((c) => (c.id === updated.id ? updated : c));
+              setCategories(next);
+              syncToServer({ categories: next });
             }}
             onAddCategory={(newCat) => {
-              setCategories((prev) => [...prev, newCat]);
+              const next = [...categories, newCat];
+              setCategories(next);
+              syncToServer({ categories: next });
             }}
             onDeleteCategory={(catId) => {
-              setCategories((prev) => prev.filter((c) => c.id !== catId));
+              const next = categories.filter((c) => c.id !== catId);
+              setCategories(next);
+              syncToServer({ categories: next });
             }}
           />
         )}
@@ -591,7 +773,10 @@ export default function App() {
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         coupleInfo={coupleInfo}
-        onSave={(updated) => setCoupleInfo(updated)}
+        onSave={(updated) => {
+          setCoupleInfo(updated);
+          syncToServer({ coupleInfo: updated });
+        }}
       />
 
       <BudgetCalculatorModal
@@ -599,9 +784,19 @@ export default function App() {
         onClose={() => setIsCalculatorOpen(false)}
         currentTarget={coupleInfo.targetAmount}
         onApplyBudget={(newTarget, suggested) => {
-          setCoupleInfo((prev) => ({ ...prev, targetAmount: newTarget }));
+          const updatedInfo = { ...coupleInfo, targetAmount: newTarget };
+          setCoupleInfo(updatedInfo);
           setCategories(suggested);
+          syncToServer({ coupleInfo: updatedInfo, categories: suggested });
         }}
+      />
+
+      <ShareRoomModal
+        isOpen={isShareModalOpen}
+        onClose={() => setIsShareModalOpen(false)}
+        roomId={roomId}
+        syncStatus={syncStatus}
+        onChangeRoom={handleChangeRoom}
       />
 
       {/* Romantic Footer */}
@@ -611,7 +806,13 @@ export default function App() {
             Dibuat dengan cinta untuk <strong className="text-slate-800">{coupleInfo.partner1.name} & {coupleInfo.partner2.name}</strong> • Menuju Akad Suci {coupleInfo.weddingDate} 💍
           </p>
           <div className="flex items-center gap-4 text-slate-400">
-            <span>Satu Hati, Satu Tabungan</span>
+            <button 
+              onClick={() => setIsShareModalOpen(true)}
+              className="text-emerald-700 font-semibold hover:underline flex items-center gap-1 cursor-pointer"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+              <span>Link Bersama: {roomId}</span>
+            </button>
             <span>•</span>
             <button onClick={handleExportData} className="hover:text-rose-600 transition cursor-pointer">
               Unduh Rekap Data

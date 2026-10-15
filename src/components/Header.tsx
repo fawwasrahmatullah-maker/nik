@@ -11,7 +11,10 @@ import {
   PieChart, 
   Download, 
   Upload, 
-  RotateCcw
+  RotateCcw,
+  Share2,
+  Radio,
+  Link2
 } from 'lucide-react';
 import { CoupleInfo, PartnerRole } from '../types/wedding';
 import { calculateWeddingCountdown, formatDateID } from '../utils/formatters';
@@ -29,6 +32,9 @@ interface HeaderProps {
   onExportData: () => void;
   onImportData: () => void;
   onResetData: () => void;
+  roomId: string;
+  syncStatus: 'connected' | 'connecting' | 'reconnecting' | 'offline';
+  onOpenShareModal: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -44,6 +50,9 @@ export const Header: React.FC<HeaderProps> = ({
   onExportData,
   onImportData,
   onResetData,
+  roomId,
+  syncStatus,
+  onOpenShareModal,
 }) => {
   const countdown = calculateWeddingCountdown(coupleInfo.weddingDate);
 
@@ -66,6 +75,14 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           <div className="flex items-center gap-2 shrink-0 text-xs">
+            <button 
+              onClick={onOpenShareModal}
+              className="flex items-center gap-1.5 bg-white text-rose-700 hover:bg-rose-50 px-2.5 py-1 rounded-md transition font-bold shadow-xs cursor-pointer"
+              title="Bagikan Link Pasangan (Data Real-Time)"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Bagikan Link Realtime</span>
+            </button>
             <button 
               onClick={onOpenCalculator}
               className="flex items-center gap-1 bg-white/20 hover:bg-white/30 px-2.5 py-1 rounded-md transition font-medium cursor-pointer"
@@ -111,6 +128,17 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold tracking-widest text-rose-600 uppercase">NikahPlan</span>
               <span className="text-[10px] bg-rose-100 text-rose-700 px-1.5 py-0.2 rounded font-semibold">Pasangan</span>
+              <button
+                onClick={onOpenShareModal}
+                className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border cursor-pointer ${
+                  syncStatus === 'connected'
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                    : 'bg-amber-50 text-amber-800 border-amber-200'
+                }`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${syncStatus === 'connected' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                <span>{syncStatus === 'connected' ? 'Realtime 🟢' : 'Menghubungkan...'}</span>
+              </button>
             </div>
             <h1 className="text-base sm:text-xl font-bold font-serif text-slate-800 tracking-tight leading-none mt-0.5">
               {coupleInfo.partner1.nickname} <span className="text-rose-500">&</span> {coupleInfo.partner2.nickname}
@@ -156,8 +184,18 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         </div>
 
-        {/* Right Action Icons: Notification & Settings */}
+        {/* Right Action Icons: Share, Notification & Settings */}
         <div className="flex items-center gap-2">
+          {/* Share Link Button */}
+          <button
+            onClick={onOpenShareModal}
+            className="flex items-center gap-1.5 py-2 px-3 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold transition cursor-pointer shadow-2xs"
+            title="Bagikan Link Pasangan Real-Time"
+          >
+            <Share2 className="w-4 h-4 text-rose-600" />
+            <span className="hidden md:inline">Bagikan Link</span>
+          </button>
+
           {/* Notification Bell */}
           <button
             onClick={() => setIsNotificationOpen(true)}
