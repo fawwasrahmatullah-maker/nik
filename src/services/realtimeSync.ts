@@ -106,3 +106,88 @@ export async function resetRoomOnServer(roomId: string): Promise<any | null> {
     return null;
   }
 }
+
+/**
+ * Posts an instant chat message to the server for sub-second delivery
+ */
+export async function postChatMessage(roomId: string, message: any): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/wedding/${encodeURIComponent(roomId)}/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-client-id': CLIENT_ID,
+      },
+      body: JSON.stringify({
+        message,
+        senderClientId: CLIENT_ID,
+      }),
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn('[Sync] Failed to post chat message:', err);
+    return false;
+  }
+}
+
+/**
+ * Broadcasts typing status
+ */
+export async function broadcastTyping(roomId: string, senderName: string, isTyping: boolean): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/wedding/${encodeURIComponent(roomId)}/typing`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-client-id': CLIENT_ID,
+      },
+      body: JSON.stringify({
+        senderName,
+        isTyping,
+        senderClientId: CLIENT_ID,
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Client-side fast image compression for transfer receipt photos
+ */
+export function compressImageFile(file: File, maxWidth = 1200, quality = 0.82): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (readerEvent) => {
+      const img = new Image();
+      img.onload = () => {
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxWidth) {
+          height = Math.round((height * maxWidth) / width);
+          width = maxWidth;
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(readerEvent.target?.result as string);
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        resolve(dataUrl);
+      };
+      img.onerror = reject;
+      img.src = readerEvent.target?.result as string;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}

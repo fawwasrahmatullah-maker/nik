@@ -493,7 +493,8 @@ async function startServer() {
     next();
   });
 
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '25mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
   // Helper to get or create room
   function getOrCreateRoom(roomId: string): RoomData {
@@ -556,6 +557,80 @@ async function startServer() {
       roomId,
       updatedAt: room.updatedAt,
     });
+  });
+
+  // 2b. POST /api/wedding/:roomId/chat -> Fast Real-Time Chat Message endpoint
+  app.post('/api/wedding/:roomId/chat', (req: Request, res: Response) => {
+    const roomId = req.params.roomId;
+    const room = getOrCreateRoom(roomId);
+    const senderClientId = (req.headers['x-client-id'] as string) || req.body.senderClientId;
+    const message = req.body.message;
+
+    if (!message || !message.id) {
+      return res.status(400).json({ error: 'Invalid message payload' });
+    }
+
+    if (!Array.isArray(room.chatMessages)) {
+      room.chatMessages = [];
+    }
+
+    // Append to message list
+    room.chatMessages.push(message);
+    room.updatedAt = Date.now();
+    rooms.set(roomId, room);
+    saveStoreToDisk();
+
+    // Instantly broadcast to all connected clients in this room
+    const clients = sseClients.get(roomId);
+    if (clients) {
+      const payload = JSON.stringify({
+        type: 'NEW_CHAT_MESSAGE',
+        roomId,
+        message,
+        senderClientId,
+        timestamp: Date.now(),
+      });
+      for (const client of clients) {
+        try {
+          client.write(`data: ${payload}\n\n`);
+        } catch {
+          clients.delete(client);
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      messageId: message.id,
+      timestamp: message.timestamp,
+    });
+  });
+
+  // 2c. POST /api/wedding/:roomId/typing -> Broadcast typing status
+  app.post('/api/wedding/:roomId/typing', (req: Request, res: Response) => {
+    const roomId = req.params.roomId;
+    const senderClientId = (req.headers['x-client-id'] as string) || req.body.senderClientId;
+    const { senderName, isTyping } = req.body;
+
+    const clients = sseClients.get(roomId);
+    if (clients) {
+      const payload = JSON.stringify({
+        type: 'TYPING_STATUS',
+        roomId,
+        senderName,
+        isTyping,
+        senderClientId,
+      });
+      for (const client of clients) {
+        try {
+          client.write(`data: ${payload}\n\n`);
+        } catch {
+          clients.delete(client);
+        }
+      }
+    }
+
+    res.json({ success: true });
   });
 
   // 3. POST /api/wedding/:roomId/reset -> Reset room to sample data

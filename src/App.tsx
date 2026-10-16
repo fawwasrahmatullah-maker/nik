@@ -35,9 +35,11 @@ import {
   pushRoomDataToServer, 
   fetchRoomDataFromServer, 
   resetRoomOnServer, 
+  postChatMessage,
   CLIENT_ID 
 } from './services/realtimeSync';
 
+import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { Header } from './components/Header';
 import { DashboardOverview } from './components/DashboardOverview';
 import { CategoryBudgetSection } from './components/CategoryBudgetSection';
@@ -51,6 +53,7 @@ import { NotificationDrawer } from './components/NotificationDrawer';
 import { CoupleSettingsModal } from './components/CoupleSettingsModal';
 import { BudgetCalculatorModal } from './components/BudgetCalculatorModal';
 import { ShareRoomModal } from './components/ShareRoomModal';
+import { ThemeSelectorModal } from './components/ThemeSelectorModal';
 
 const STORAGE_KEYS = {
   COUPLE_INFO: 'nikahplan_couple_info',
@@ -62,11 +65,14 @@ const STORAGE_KEYS = {
   CHAT_MESSAGES: 'nikahplan_chat_messages',
 };
 
-export default function App() {
+function MainApp() {
+  const { themeConfig, isDark, isCute } = useTheme();
+
   // Active Room ID from URL query ?room=... or localStorage
   const [roomId, setRoomId] = useState<string>(() => getInitialRoomId());
   const [syncStatus, setSyncStatus] = useState<'connected' | 'connecting' | 'reconnecting' | 'offline'>('connecting');
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [isThemeModalOpen, setIsThemeModalOpen] = useState(false);
 
   // Core state
   const [coupleInfo, setCoupleInfo] = useState<CoupleInfo>(() => {
@@ -146,7 +152,6 @@ export default function App() {
   const [isCalculatorOpen, setIsCalculatorOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const lastPushedHashRef = useRef<string>('');
 
   // Local storage caching per room
   useEffect(() => {
@@ -219,6 +224,19 @@ export default function App() {
         if (!isMounted) return;
         try {
           const payload = JSON.parse(event.data);
+
+          // Fast real-time chat message broadcast
+          if (payload.type === 'NEW_CHAT_MESSAGE') {
+            if (payload.message && payload.senderClientId !== CLIENT_ID) {
+              setChatMessages((prev) => {
+                if (prev.some((m) => m.id === payload.message.id)) return prev;
+                return [...prev, payload.message];
+              });
+              playDepositSound();
+            }
+            return;
+          }
+
           if (payload.type === 'CONNECTED' || payload.type === 'ROOM_UPDATE') {
             const data = payload.data;
             if (data && payload.senderClientId !== CLIENT_ID) {
@@ -426,8 +444,16 @@ export default function App() {
     syncToServer({ transactions: nextTransactions });
   };
 
-  // Chat message send handler
-  const handleSendChatMessage = (msg: { text: string; sticker?: string; type?: ChatMessage['type']; highlightAmount?: number }) => {
+  // Instant Real-time Chat message send handler
+  const handleSendChatMessage = (msg: { 
+    text: string; 
+    sticker?: string; 
+    type?: ChatMessage['type']; 
+    highlightAmount?: number;
+    imageUrl?: string;
+    imageName?: string;
+    bankName?: string;
+  }) => {
     const senderRole = activePartner === 'partner2' ? 'partner2' : 'partner1';
     const sender = coupleInfo[senderRole];
 
@@ -439,6 +465,9 @@ export default function App() {
       sticker: msg.sticker,
       type: msg.type || 'text',
       highlightAmount: msg.highlightAmount,
+      imageUrl: msg.imageUrl,
+      imageName: msg.imageName,
+      bankName: msg.bankName,
       timestamp: Date.now(),
     };
 
@@ -446,8 +475,20 @@ export default function App() {
     setChatMessages(nextChats);
     playDepositSound();
 
-    // Broadcast chat message to partner device immediately
-    syncToServer({ chatMessages: nextChats });
+    // Fast sub-second delivery to partner via dedicated endpoint
+    postChatMessage(roomId, newChat);
+  };
+
+  const handleRecordDepositFromChat = (amount: number, description: string, partnerId: PartnerRole) => {
+    handleAddTransaction({
+      type: 'deposit',
+      amount,
+      date: new Date().toISOString().split('T')[0],
+      partnerId,
+      description,
+      pocketSource: coupleInfo[partnerId]?.pocketName || coupleInfo.jointAccountName,
+      notes: 'Terverifikasi dari foto bukti transfer di Obrolan Pasangan',
+    });
   };
 
   const handleAddReaction = (messageId: string, emoji: string) => {
@@ -615,7 +656,9 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#FAF7F5] flex flex-col selection:bg-rose-200 selection:text-rose-900">
+    <div className={`min-h-screen flex flex-col transition-colors duration-300 ${themeConfig.bodyBg} ${
+      isDark ? 'text-slate-100 selection:bg-rose-900 selection:text-white' : isCute ? 'text-pink-950 selection:bg-pink-200 selection:text-pink-900' : 'text-slate-800 selection:bg-rose-200 selection:text-rose-900'
+    }`}>
       {/* Hidden file input for import */}
       <input
         type="file"
@@ -625,7 +668,7 @@ export default function App() {
         className="hidden"
       />
 
-      {/* Main Header with Realtime Indicator & Link Share */}
+      {/* Main Header with Realtime Indicator, Theme, & Link Share */}
       <Header
         coupleInfo={coupleInfo}
         activeTab={activeTab}
@@ -642,6 +685,7 @@ export default function App() {
         roomId={roomId}
         syncStatus={syncStatus}
         onOpenShareModal={() => setIsShareModalOpen(true)}
+        onOpenThemeModal={() => setIsThemeModalOpen(true)}
       />
 
       {/* Main Body Content based on active tab */}
@@ -715,6 +759,7 @@ export default function App() {
             messages={chatMessages}
             onSendMessage={handleSendChatMessage}
             onAddReaction={handleAddReaction}
+            onRecordDepositFromChat={handleRecordDepositFromChat}
           />
         )}
 
@@ -799,27 +844,48 @@ export default function App() {
         onChangeRoom={handleChangeRoom}
       />
 
-      {/* Romantic Footer */}
-      <footer className="border-t border-rose-100 bg-white/70 py-6 text-center text-xs text-slate-500">
+      <ThemeSelectorModal
+        isOpen={isThemeModalOpen}
+        onClose={() => setIsThemeModalOpen(false)}
+      />
+
+      {/* Romantic / Themed Footer */}
+      <footer className={`border-t py-6 text-center text-xs transition-colors ${
+        isDark ? 'border-slate-800 bg-[#0F172A]/80 text-slate-400' : isCute ? 'border-pink-200 bg-pink-50/50 text-pink-700' : 'border-rose-100 bg-white/70 text-slate-500'
+      }`}>
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
           <p className="flex items-center justify-center gap-1.5">
-            Dibuat dengan cinta untuk <strong className="text-slate-800">{coupleInfo.partner1.name} & {coupleInfo.partner2.name}</strong> • Menuju Akad Suci {coupleInfo.weddingDate} 💍
+            {isCute ? 'Dibuat penuh cinta & kasih sayang untuk ' : 'Dibuat dengan cinta untuk '}
+            <strong className={isDark ? 'text-white' : isCute ? 'text-pink-950' : 'text-slate-800'}>
+              {coupleInfo.partner1.name} {isCute ? '💖' : '&'} {coupleInfo.partner2.name}
+            </strong> • Menuju Akad Suci {coupleInfo.weddingDate} 💍
           </p>
-          <div className="flex items-center gap-4 text-slate-400">
+          <div className="flex items-center gap-4">
             <button 
               onClick={() => setIsShareModalOpen(true)}
-              className="text-emerald-700 font-semibold hover:underline flex items-center gap-1 cursor-pointer"
+              className="text-emerald-500 font-semibold hover:underline flex items-center gap-1 cursor-pointer"
             >
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
-              <span>Link Bersama: {roomId}</span>
+              <span>Ruang Realtime: {roomId}</span>
             </button>
             <span>•</span>
-            <button onClick={handleExportData} className="hover:text-rose-600 transition cursor-pointer">
-              Unduh Rekap Data
+            <button 
+              onClick={() => setIsThemeModalOpen(true)}
+              className="hover:underline cursor-pointer flex items-center gap-1"
+            >
+              <span>{themeConfig.icon} {themeConfig.name}</span>
             </button>
           </div>
         </div>
       </footer>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <ThemeProvider>
+      <MainApp />
+    </ThemeProvider>
   );
 }

@@ -93,4 +93,9 @@ export interface ChatMessage {
   reaction?: string;
   type?: 'text' | 'savings_milestone' | 'pledge' | 'transfer_alert';
   highlightAmount?: number;
+  imageUrl?: string;
+  imageName?: string;
+  bankName?: string;
+  autoRecorded?: boolean;
 }
+
